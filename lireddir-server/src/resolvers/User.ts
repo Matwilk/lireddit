@@ -3,6 +3,12 @@ import { MyContext } from "src/types";
 import { User } from "../entities/User";
 import argon2 from "argon2";
 
+declare module "express-session" {
+  interface Session {
+    userId: number;
+  }
+}
+
 @InputType()
 class UsernamePasswordInput {
   @Field()
@@ -32,6 +38,19 @@ class UserResponse {
 
 @Resolver()
 export class UserResolver {
+  @Query(() => User, {nullable: true})
+  async me(
+    @Ctx() { em, req }: MyContext
+  ): Promise<User | null> {
+    // not logged in
+    if (!req.session.userId) {
+      return null;
+    }
+
+    const user = await em.findOne(User, {id: req.session.userId})
+    return user;
+  }
+
   @Query(() => [User])
   users(
     @Ctx() { em }: MyContext
@@ -39,30 +58,60 @@ export class UserResolver {
     return em.find(User, {})
   }
 
-  @Query(() => User, { nullable: true })
-  user(
-    @Arg('id') id: number,
-    @Ctx() { em }: MyContext
-  ): Promise<User | null> {
-    return em.findOne(User, { id });
-  }
+  // @Query(() => User, { nullable: true })
+  // user(
+  //   @Arg('id') id: number,
+  //   @Ctx() { em }: MyContext
+  // ): Promise<User | null> {
+  //   return em.findOne(User, { id });
+  // }
 
   @Mutation(() => UserResponse)
   async register(
     @Arg('options') options: UsernamePasswordInput,
     @Ctx() { em }: MyContext
-  ): Promise<User | null> {
+  ): Promise<UserResponse> {
+    if (options.username.length <= 2) {
+      return {
+        errors: [{
+          field: 'username',
+          message: 'length must be greater than 2'
+        }]
+      }
+    }
+
+    if (options.password.length <= 3) {
+      return {
+        errors: [{
+          field: 'password',
+          message: 'length must be greater thant 3'
+        }]
+      }
+    }
+
     const hashedPwd = await argon2.hash(options.password)
     const user = em.create(User, {username: options.username, password: hashedPwd});
 
-    await em.persistAndFlush(user);
-    return user;
+    try {
+      await em.persistAndFlush(user);
+    }
+    catch (err) {
+      if (err.code === '23505') {
+        return {
+          errors: [{
+            field: 'username',
+            message: 'already exists'
+          }]
+        }
+      }
+    }
+    return { user };
   }
 
   @Mutation(() => UserResponse, { nullable: true })
   async login(
     @Arg('options') options: UsernamePasswordInput,
-    @Ctx() { em }: MyContext
+    @Ctx() { em, req }: MyContext
   ): Promise<UserResponse> {
     const user = await em.findOne(User, {username: options.username});
     if (!user) {
@@ -83,6 +132,8 @@ export class UserResolver {
         }]
       }
     }
+
+    req.session!.userId = user.id;
 
     await em.persistAndFlush(user);
     return { user };
